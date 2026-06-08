@@ -346,6 +346,20 @@ The server includes interactive guides accessible through MCP:
 
 AI assistants can access these guides through the MCP Resources API.
 
+### Troubleshooting
+
+If the setup page never shows a QR code and logs contain `Client outdated (405)`, WhatsApp rejected the bundled web client revision before QR generation. The server fetches the latest WhatsApp Web revision on startup by default:
+
+```bash
+WHATSAPP_WEB_VERSION_AUTO_UPDATE=true
+```
+
+Restart the server and create/open the setup page again. If automatic fetching is blocked in your environment, set a manual version:
+
+```bash
+WHATSAPP_WEB_VERSION=2.3000.123456789
+```
+
 ### Environment Variables
 
 See `.env.example` and be happy!

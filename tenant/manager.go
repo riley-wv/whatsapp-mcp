@@ -615,7 +615,7 @@ var tenantSetupTemplate = template.Must(template.New("tenant").Parse(`<!doctype 
     {{if .APIKey}}<pre>{{.APIKey}}</pre><p>This API key is shown during setup. Store it securely; after a restart, this page can validate it but cannot recover it.</p>{{else}}<p>The API key was already shown. Use the key you saved for this tenant.</p>{{end}}
     {{if not .WhatsAppReady}}
       <h2>WhatsApp QR</h2>
-      {{if .HasQRCode}}<img alt="WhatsApp setup QR code" src="/setup/{{.ID}}/qr.png?setup_token={{.SetupToken}}">{{else}}<p>QR code is being generated. This page refreshes automatically.</p>{{end}}
+      {{if eq .QREvent "err-client-outdated"}}<p>WhatsApp rejected this client as outdated. Restart the server so it can refresh the WhatsApp Web version, or set WHATSAPP_WEB_VERSION manually.</p>{{else if .HasQRCode}}<img alt="WhatsApp setup QR code" src="/setup/{{.ID}}/qr.png?setup_token={{.SetupToken}}">{{else}}<p>QR code is being generated. This page refreshes automatically.</p>{{end}}
       <p>Open WhatsApp on your phone, go to Linked devices, and scan this QR code.</p>
     {{end}}
   </main>

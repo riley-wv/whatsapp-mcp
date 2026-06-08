@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"whatsapp-mcp/tenant"
+	"whatsapp-mcp/whatsapp"
 
 	"github.com/joho/godotenv"
 )
@@ -29,6 +30,8 @@ func main() {
 		log.Printf("Warning: Invalid timezone %q, using UTC: %v", timezoneName, err)
 		timezone = time.UTC
 	}
+
+	whatsapp.ConfigureWebVersion(context.Background(), log.Default())
 
 	tenantManager, err := tenant.NewManager(logLevel, timezone, log.Default())
 	if err != nil {
