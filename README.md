@@ -39,7 +39,7 @@ AI:  *reads context, sends reply* → "Sent! I've proposed Thursday at noon"
 - **🔍 Powerful Search** - Pattern matching, cross-chat queries, sender filtering
 - **⏱️ Timezone Support** - Messages displayed in your local timezone
 - **📥 On-Demand Loading** - Fetch older messages from WhatsApp servers as needed
-- **🔐 Secure by Design** - API key authentication, local data storage, HTTPS ready
+- **🔐 Secure by Design** - Per-setup API keys, isolated WhatsApp storage, HTTPS ready
 
 ### MCP Features
 
@@ -90,11 +90,13 @@ graph TB
 
     subgraph "WhatsApp MCP Server"
         B[MCP HTTP Server :8080]
-        C[MCP Layer]
-        D[WhatsApp Client]
-        E[(SQLite Database)]
+        S[/Setup UI<br/>/setup/]
+        C[MCP Layer<br/>per tenant]
+        D[WhatsApp Client<br/>per tenant]
+        E[(SQLite Database<br/>per tenant)]
 
-        B -->|/mcp endpoint| C
+        B -->|/setup creates tenant + QR| S
+        B -->|/mcp/{tenant_id}| C
         B -->|/health| B
 
         C -->|Tools| C1[list_chats<br/>get_chat_messages<br/>search_messages<br/>find_chat<br/>send_message<br/>load_more_messages<br/>get_my_info]
@@ -112,7 +114,7 @@ graph TB
         F[WhatsApp Servers]
     end
 
-    A <-->|Streamable HTTP<br/>API Key Auth| B
+    A <-->|Streamable HTTP<br/>Tenant API Key Auth| B
 
     style A fill:#4A90E2,stroke:#2E5C8A,stroke-width:2px,color:#000
     style B fill:#F5A623,stroke:#C67E1B,stroke-width:2px,color:#000
@@ -156,19 +158,19 @@ graph TB
    docker compose up -d
    ```
 
-3. **Link WhatsApp**
-   ```bash
-   # View logs to see QR code
-   docker compose logs -f whatsapp-mcp
+3. **Create a WhatsApp setup**
+   Open `http://localhost:8080/setup`, click **Create WhatsApp Setup**, and scan the QR code with WhatsApp:
+   `Settings → Linked Devices → Link a Device`.
 
-   # Scan QR code with WhatsApp mobile app:
-   # Settings → Linked Devices → Link a Device
-   ```
+   The setup page shows:
+   - A tenant ID
+   - A tenant-specific MCP URL
+   - A tenant-specific API key
 
 4. **Verify it's running**
    ```bash
    curl http://localhost:8080/health
-   # Expected: "OK"
+   # Expected: {"status":"ok"}
    ```
 
 ### Option 2: Local Setup
@@ -191,7 +193,8 @@ graph TB
    go run main.go
    ```
 
-4. **Link WhatsApp** (scan QR code shown in terminal)
+4. **Link WhatsApp**
+   Open `http://localhost:8080/setup`, create a setup, and scan the QR code.
 
 ## 🔌 MCP Integration
 
@@ -203,8 +206,11 @@ Add to your Claude Desktop config (`~/Library/Application Support/Claude/claude_
 {
   "mcpServers": {
     "whatsapp": {
-      "url": "http://localhost:8080/mcp/your-secret-api-key",
-      "transport": "http"
+      "url": "http://localhost:8080/mcp/your-tenant-id",
+      "transport": "http",
+      "headers": {
+        "Authorization": "Bearer your-tenant-api-key"
+      }
     }
   }
 }
@@ -214,9 +220,21 @@ Add to your Claude Desktop config (`~/Library/Application Support/Claude/claude_
 
 The server exposes an HTTP+SSE endpoint compatible with any MCP client:
 
-- **URL:** `http://localhost:8080/mcp/{API_KEY}`
+- **Setup URL:** `http://localhost:8080/setup`
+- **MCP URL:** `http://localhost:8080/mcp/{TENANT_ID}`
 - **Transport:** Streamable HTTP
-- **Authentication:** API key in URL path
+- **Direct API-key authentication:** `Authorization: Bearer {TENANT_API_KEY}` or `X-API-Key: {TENANT_API_KEY}`
+- **Standard MCP OAuth:** Supported per tenant. Unauthenticated MCP requests return a `WWW-Authenticate` challenge with tenant-specific protected-resource metadata. The OAuth login page asks for that tenant's API key and issues an access token bound to `http://host/mcp/{TENANT_ID}`.
+
+Each WhatsApp setup has its own tenant ID, WhatsApp auth database, message database, media directory, and API key. A tenant API key can only call that tenant's MCP endpoint.
+
+OAuth discovery endpoints are tenant-specific:
+
+- Protected resource metadata: `/.well-known/oauth-protected-resource/mcp/{TENANT_ID}`
+- Authorization server metadata: `/oauth/{TENANT_ID}/.well-known/oauth-authorization-server`
+- Dynamic client registration: `/oauth/{TENANT_ID}/register`
+- Authorization: `/oauth/{TENANT_ID}/authorize`
+- Token exchange: `/oauth/{TENANT_ID}/token`
 
 ## 🎨 Usage Examples
 
@@ -262,12 +280,15 @@ AI: [Uses search_keyword prompt]
 
 ### Local Storage
 
-All data is stored in `./data/`:
-- **`db/`** - Database files
-  - `messages.db` - SQLite database with messages and chats
-  - `whatsapp_auth.db` - WhatsApp session credentials
+All tenant data is stored under `./data/tenants/{tenant_id}/`:
+- **`db/messages.db`** - SQLite database with messages and chats
+- **`db/whatsapp_auth.db`** - WhatsApp session credentials
 - **`media/`** - Downloaded media files
 - **`whatsapp.log`** - WhatsApp client logs
+
+Tenant metadata is stored in `./data/tenants/registry.json`. API keys and setup tokens are stored as SHA-256 hashes, not plaintext.
+
+For Railway deployments, mount `./data/tenants` on persistent storage. A shared Railway database is not required for tenant isolation because each tenant already has separate SQLite and WhatsApp auth files; if the filesystem is ephemeral, WhatsApp sessions and tenant API-key hashes will be lost on restart.
 
 **⚠️ Important:** Database files contain sensitive data. Keep them secure (file permissions `600`) and backed up.
 

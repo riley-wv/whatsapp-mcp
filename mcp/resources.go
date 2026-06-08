@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"whatsapp-mcp/paths"
 
 	"github.com/mark3labs/mcp-go/mcp"
 )
@@ -908,10 +907,10 @@ func (m *MCPServer) handleMediaResource(ctx context.Context, req mcp.ReadResourc
 	}
 
 	// construct full file path
-	fullPath := paths.GetMediaPath(cleanPath)
+	fullPath := filepath.Join(m.mediaDir, cleanPath)
 
 	// get absolute paths for security validation
-	mediaDir, err := filepath.Abs(paths.DataMediaDir)
+	mediaDir, err := filepath.Abs(m.mediaDir)
 	if err != nil {
 		return nil, fmt.Errorf("failed to resolve media directory: %w", err)
 	}

@@ -10,12 +10,22 @@ import (
 
 // GetConnectionString returns the SQLite connection string with pragmas
 func GetConnectionString() string {
-	return paths.MessagesDBPath + "?_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)"
+	return GetConnectionStringAt(paths.MessagesDBPath)
+}
+
+// GetConnectionStringAt returns a SQLite connection string for a database path.
+func GetConnectionStringAt(dbPath string) string {
+	return dbPath + "?_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)"
 }
 
 // InitDB initializes the database and runs migrations
 func InitDB() (*sql.DB, error) {
-	db, err := sql.Open("sqlite", GetConnectionString())
+	return InitDBAt(paths.MessagesDBPath)
+}
+
+// InitDBAt initializes the database at dbPath and runs migrations.
+func InitDBAt(dbPath string) (*sql.DB, error) {
+	db, err := sql.Open("sqlite", GetConnectionStringAt(dbPath))
 
 	if err != nil {
 		return nil, err

@@ -4,6 +4,7 @@ import (
 	"log"
 	"time"
 
+	"whatsapp-mcp/paths"
 	"whatsapp-mcp/storage"
 	"whatsapp-mcp/whatsapp"
 
@@ -18,10 +19,16 @@ type MCPServer struct {
 	mediaStore *storage.MediaStore
 	log        *log.Logger
 	timezone   *time.Location
+	mediaDir   string
 }
 
 // NewMCPServer creates a new MCP server with the provided WhatsApp client and storage.
 func NewMCPServer(wa *whatsapp.Client, store *storage.MessageStore, mediaStore *storage.MediaStore, timezone *time.Location) *MCPServer {
+	return NewMCPServerWithMediaDir(wa, store, mediaStore, timezone, paths.DataMediaDir)
+}
+
+// NewMCPServerWithMediaDir creates a new MCP server using an instance-specific media directory.
+func NewMCPServerWithMediaDir(wa *whatsapp.Client, store *storage.MessageStore, mediaStore *storage.MediaStore, timezone *time.Location, mediaDir string) *MCPServer {
 	s := server.NewMCPServer(
 		"WhatsApp MCP",
 		"1.0.0",
@@ -45,6 +52,7 @@ Use prompts for common workflows or resources for detailed guides.`),
 		mediaStore: mediaStore,
 		log:        log.Default(),
 		timezone:   timezone,
+		mediaDir:   mediaDir,
 	}
 
 	// register all capabilities
