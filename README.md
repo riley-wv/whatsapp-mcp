@@ -207,10 +207,7 @@ Add to your Claude Desktop config (`~/Library/Application Support/Claude/claude_
   "mcpServers": {
     "whatsapp": {
       "url": "http://localhost:8080/mcp",
-      "transport": "http",
-      "headers": {
-        "Authorization": "Bearer your-tenant-api-key"
-      }
+      "transport": "http"
     }
   }
 }
@@ -224,7 +221,7 @@ The server exposes an HTTP+SSE endpoint compatible with any MCP client:
 - **MCP URL:** `http://localhost:8080/mcp`
 - **Transport:** Streamable HTTP
 - **Direct API-key authentication:** `Authorization: Bearer {TENANT_API_KEY}` or `X-API-Key: {TENANT_API_KEY}`. The server derives the tenant from the API key hash.
-- **Standard MCP OAuth:** Supported on the same shared MCP URL. Unauthenticated MCP requests return a `WWW-Authenticate` challenge with protected-resource metadata. The OAuth login page asks for the tenant API key, then issues an access token bound to `http://host/mcp` and internally mapped to that tenant.
+- **Custom MCP OAuth:** Supported on the same shared MCP URL. Unauthenticated MCP requests return a `WWW-Authenticate` challenge with protected-resource metadata. The OAuth flow uses this server's shared client ID/secret, creates a WhatsApp setup, shows a WhatsApp QR code, waits for the user to connect WhatsApp, then issues an access token bound to `http://host/mcp` and internally mapped to that tenant.
 
 Each WhatsApp setup has its own tenant ID, WhatsApp auth database, message database, media directory, and API key. A tenant API key or OAuth token can only access that tenant's WhatsApp data.
 
@@ -235,6 +232,13 @@ Shared OAuth discovery endpoints:
 - Dynamic client registration: `/oauth/register`
 - Authorization: `/oauth/authorize`
 - Token exchange: `/oauth/token`
+
+Default shared OAuth client credentials are:
+
+- Client ID: `whatsapp-mcp`
+- Client secret: set `MCP_OAUTH_CLIENT_SECRET` in the environment
+
+Clients can also call `/oauth/register`; it returns the same shared client ID and secret.
 
 The explicit tenant endpoint `http://localhost:8080/mcp/{TENANT_ID}` and tenant-specific OAuth endpoints remain available for backward compatibility.
 
