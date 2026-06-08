@@ -50,6 +50,10 @@ func main() {
 	mux.HandleFunc("/mcp/", tenantManager.HandleMCP)
 	mux.HandleFunc("/oauth", tenantManager.HandleOAuth)
 	mux.HandleFunc("/oauth/", tenantManager.HandleOAuth)
+	mux.HandleFunc("/.well-known/openid-configuration", tenantManager.HandleWellKnownOAuth)
+	mux.HandleFunc("/.well-known/openid-configuration/", tenantManager.HandleWellKnownOAuth)
+	mux.HandleFunc("/.well-known/oauth-authorization-server", tenantManager.HandleWellKnownOAuth)
+	mux.HandleFunc("/.well-known/oauth-authorization-server/", tenantManager.HandleWellKnownOAuth)
 	mux.HandleFunc("/.well-known/oauth-protected-resource", tenantManager.HandleProtectedResourceMetadata)
 	mux.HandleFunc("/.well-known/oauth-protected-resource/", tenantManager.HandleProtectedResourceMetadata)
 

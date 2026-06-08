@@ -408,10 +408,27 @@ func (m *Manager) handleRootOAuth(path string, w http.ResponseWriter, r *http.Re
 		m.rootOAuthMetadata(w, r)
 	case "/register":
 		m.rootOAuthRegister(w, r)
+	case "/configure", "/oauth/configure":
+		m.rootOAuthConfigure(w, r)
 	case "/authorize":
 		m.rootOAuthAuthorize(w, r)
 	case "/token":
 		m.rootOAuthToken(w, r)
+	default:
+		http.NotFound(w, r)
+	}
+}
+
+// HandleWellKnownOAuth serves issuer-derived OAuth/OIDC discovery URLs, such as
+// /.well-known/openid-configuration/oauth for an issuer of https://host/oauth.
+func (m *Manager) HandleWellKnownOAuth(w http.ResponseWriter, r *http.Request) {
+	path := strings.Trim(r.URL.Path, "/")
+	switch path {
+	case ".well-known/openid-configuration",
+		".well-known/openid-configuration/oauth",
+		".well-known/oauth-authorization-server",
+		".well-known/oauth-authorization-server/oauth":
+		m.rootOAuthMetadata(w, r)
 	default:
 		http.NotFound(w, r)
 	}
@@ -430,6 +447,22 @@ func (m *Manager) rootOAuthMetadata(w http.ResponseWriter, r *http.Request) {
 		"token_endpoint_auth_methods_supported": []string{"client_secret_basic", "client_secret_post"},
 		"scopes_supported":                      []string{"whatsapp.read", "whatsapp.write"},
 		"resource_indicators_supported":         true,
+	})
+}
+
+func (m *Manager) rootOAuthConfigure(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost && r.Method != http.MethodGet {
+		writeOAuthError(w, http.StatusMethodNotAllowed, "invalid_request", "Method not allowed")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"client_id":                  m.oauthClient.ID,
+		"client_secret":              m.oauthClient.Secret,
+		"client_secret_expires_at":   0,
+		"token_endpoint_auth_method": "client_secret_basic",
+		"scope":                      "whatsapp.read whatsapp.write",
+		"authorization_endpoint":     baseURL(r) + "/oauth/authorize",
+		"token_endpoint":             baseURL(r) + "/oauth/token",
 	})
 }
 
@@ -459,9 +492,9 @@ func (m *Manager) rootOAuthRegister(w http.ResponseWriter, r *http.Request) {
 	if req.Scope == "" {
 		req.Scope = "whatsapp.read whatsapp.write"
 	}
-	if req.TokenEndpointAuthMethod == "" {
-		req.TokenEndpointAuthMethod = "client_secret_basic"
-	}
+	// Poke may register as a public client, but this server intentionally uses
+	// one shared confidential OAuth client for every integration.
+	req.TokenEndpointAuthMethod = "client_secret_basic"
 
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"client_id":                  m.oauthClient.ID,
@@ -748,7 +781,7 @@ func (m *Manager) getPendingOAuth(sessionID string) (pendingOAuthAuthorization, 
 // HandleProtectedResourceMetadata serves tenant-specific MCP OAuth protected-resource metadata.
 func (m *Manager) HandleProtectedResourceMetadata(w http.ResponseWriter, r *http.Request) {
 	trimmed := strings.Trim(strings.TrimPrefix(r.URL.Path, "/.well-known/oauth-protected-resource"), "/")
-	if trimmed == "" {
+	if trimmed == "" || trimmed == "oauth" {
 		m.oauth.ProtectedResourceMetadata(w, r)
 		return
 	}
