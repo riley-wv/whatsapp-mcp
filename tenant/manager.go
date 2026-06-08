@@ -128,7 +128,7 @@ func NewManager(logLevel string, timezone *time.Location, logger *log.Logger) (*
 		logger:       logger,
 		oauthClient: oauthClient{
 			ID:     getenv("MCP_OAUTH_CLIENT_ID", "whatsapp-mcp"),
-			Secret: getenv("MCP_OAUTH_CLIENT_SECRET", "whatsapp-mcp-secret-change-me"),
+			Secret: getenv("MCP_OAUTH_CLIENT_SECRET", "change-this-shared-secret"),
 		},
 		records:       make(map[string]Record),
 		instances:     make(map[string]*Instance),
