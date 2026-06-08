@@ -438,15 +438,41 @@ func (m *Manager) rootOAuthRegister(w http.ResponseWriter, r *http.Request) {
 		writeOAuthError(w, http.StatusMethodNotAllowed, "invalid_request", "Method not allowed")
 		return
 	}
+	var req struct {
+		ClientName              string   `json:"client_name"`
+		RedirectURIs            []string `json:"redirect_uris"`
+		TokenEndpointAuthMethod string   `json:"token_endpoint_auth_method"`
+		GrantTypes              []string `json:"grant_types"`
+		ResponseTypes           []string `json:"response_types"`
+		Scope                   string   `json:"scope"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&req)
+	if req.ClientName == "" {
+		req.ClientName = "WhatsApp MCP"
+	}
+	if len(req.GrantTypes) == 0 {
+		req.GrantTypes = []string{"authorization_code", "refresh_token"}
+	}
+	if len(req.ResponseTypes) == 0 {
+		req.ResponseTypes = []string{"code"}
+	}
+	if req.Scope == "" {
+		req.Scope = "whatsapp.read whatsapp.write"
+	}
+	if req.TokenEndpointAuthMethod == "" {
+		req.TokenEndpointAuthMethod = "client_secret_basic"
+	}
+
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"client_id":                  m.oauthClient.ID,
 		"client_secret":              m.oauthClient.Secret,
 		"client_secret_expires_at":   0,
-		"client_name":                "WhatsApp MCP",
-		"grant_types":                []string{"authorization_code", "refresh_token"},
-		"response_types":             []string{"code"},
-		"token_endpoint_auth_method": "client_secret_basic",
-		"scope":                      "whatsapp.read whatsapp.write",
+		"client_name":                req.ClientName,
+		"redirect_uris":              req.RedirectURIs,
+		"grant_types":                req.GrantTypes,
+		"response_types":             req.ResponseTypes,
+		"token_endpoint_auth_method": req.TokenEndpointAuthMethod,
+		"scope":                      req.Scope,
 	})
 }
 
@@ -603,7 +629,7 @@ func (m *Manager) exchangeRootAuthorizationCode(w http.ResponseWriter, r *http.R
 		writeOAuthError(w, http.StatusBadRequest, "invalid_grant", "Invalid or expired authorization code")
 		return
 	}
-	if !verifyPKCE(grant.CodeChallenge, grant.CodeChallengeMethod, r.FormValue("code_verifier")) {
+	if grant.CodeChallenge != "" && !verifyPKCE(grant.CodeChallenge, grant.CodeChallengeMethod, r.FormValue("code_verifier")) {
 		writeOAuthError(w, http.StatusBadRequest, "invalid_grant", "PKCE verification failed")
 		return
 	}
@@ -643,6 +669,7 @@ func (m *Manager) issueRootTokenResponse(w http.ResponseWriter, grant oauthGrant
 		"expires_in":    int64(time.Hour.Seconds()),
 		"refresh_token": refresh,
 		"scope":         grant.Scope,
+		"resource":      grant.Resource,
 	})
 }
 
@@ -670,14 +697,11 @@ func (m *Manager) validateRootAuthorizeRequest(r *http.Request) string {
 	if _, err := url.Parse(q.Get("redirect_uri")); err != nil {
 		return "invalid redirect_uri"
 	}
-	if q.Get("code_challenge") == "" {
-		return "code_challenge is required"
-	}
 	method := q.Get("code_challenge_method")
 	if method == "" {
 		method = "plain"
 	}
-	if method != "S256" && method != "plain" {
+	if q.Get("code_challenge") != "" && method != "S256" && method != "plain" {
 		return "unsupported code_challenge_method"
 	}
 	return ""

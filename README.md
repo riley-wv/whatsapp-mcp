@@ -240,6 +240,29 @@ Default shared OAuth client credentials are:
 
 Clients can also call `/oauth/register`; it returns the same shared client ID and secret.
 
+### Poke
+
+Poke can connect using the single shared MCP URL:
+
+```bash
+npx poke@latest mcp add https://your-domain.example/mcp -n "WhatsApp"
+```
+
+For local development through Poke's tunnel:
+
+```bash
+npx poke@latest tunnel http://localhost:8080/mcp -n "WhatsApp"
+```
+
+The server supports Poke's OAuth discovery and Dynamic Client Registration flow. If you configure a Poke Kitchen template instead of DCR, use:
+
+```text
+Client ID: whatsapp-mcp
+Client Secret: your MCP_OAUTH_CLIENT_SECRET value
+```
+
+Poke includes `X-Poke-User-Id` on MCP calls. The server accepts this header; WhatsApp data isolation is enforced by the OAuth token or tenant API key used on the request.
+
 The explicit tenant endpoint `http://localhost:8080/mcp/{TENANT_ID}` and tenant-specific OAuth endpoints remain available for backward compatibility.
 
 ## 🎨 Usage Examples
