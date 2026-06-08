@@ -72,11 +72,48 @@ type Manager struct {
 	logLevel     string
 	timezone     *time.Location
 	logger       *log.Logger
+	oauthClient  oauthClient
 
 	mu        sync.RWMutex
 	records   map[string]Record
 	instances map[string]*Instance
 	secrets   map[string]CreatedTenant
+	oauth     *auth.Server
+
+	pendingOAuth  map[string]pendingOAuthAuthorization
+	authCodes     map[string]oauthGrant
+	accessTokens  map[string]oauthGrant
+	refreshTokens map[string]oauthGrant
+}
+
+type oauthClient struct {
+	ID     string
+	Secret string
+}
+
+type pendingOAuthAuthorization struct {
+	ID                  string
+	TenantID            string
+	SetupToken          string
+	ClientID            string
+	RedirectURI         string
+	State               string
+	Scope               string
+	Resource            string
+	CodeChallenge       string
+	CodeChallengeMethod string
+	ExpiresAt           time.Time
+}
+
+type oauthGrant struct {
+	TenantID            string
+	ClientID            string
+	RedirectURI         string
+	Scope               string
+	Resource            string
+	CodeChallenge       string
+	CodeChallengeMethod string
+	ExpiresAt           time.Time
 }
 
 // NewManager loads the tenant registry.
@@ -89,10 +126,26 @@ func NewManager(logLevel string, timezone *time.Location, logger *log.Logger) (*
 		logLevel:     logLevel,
 		timezone:     timezone,
 		logger:       logger,
-		records:      make(map[string]Record),
-		instances:    make(map[string]*Instance),
-		secrets:      make(map[string]CreatedTenant),
+		oauthClient: oauthClient{
+			ID:     getenv("MCP_OAUTH_CLIENT_ID", "whatsapp-mcp"),
+			Secret: getenv("MCP_OAUTH_CLIENT_SECRET", "whatsapp-mcp-secret-change-me"),
+		},
+		records:       make(map[string]Record),
+		instances:     make(map[string]*Instance),
+		secrets:       make(map[string]CreatedTenant),
+		pendingOAuth:  make(map[string]pendingOAuthAuthorization),
+		authCodes:     make(map[string]oauthGrant),
+		accessTokens:  make(map[string]oauthGrant),
+		refreshTokens: make(map[string]oauthGrant),
 	}
+	m.oauth = auth.NewServer(auth.Config{
+		ResourcePath:    "/mcp",
+		IssuerPath:      "/oauth",
+		MetadataPath:    "/.well-known/oauth-protected-resource",
+		RequiredScopes:  []string{"whatsapp.read", "whatsapp.write"},
+		IsWhatsAppReady: func() bool { return true },
+		ResolveAPIKey:   m.TenantIDForAPIKey,
+	})
 	if err := os.MkdirAll(tenantsDir, 0o700); err != nil {
 		return nil, err
 	}
@@ -266,11 +319,23 @@ func (m *Manager) HandleSetup(w http.ResponseWriter, r *http.Request) {
 	m.renderTenantSetup(w, r, id, "")
 }
 
-// HandleMCP serves /mcp/{tenant_id} with per-tenant API-key isolation.
+// HandleMCP serves /mcp as a single public URL and /mcp/{tenant_id} as a
+// backward-compatible explicit tenant URL.
 func (m *Manager) HandleMCP(w http.ResponseWriter, r *http.Request) {
 	trimmed := strings.Trim(strings.TrimPrefix(r.URL.Path, "/mcp"), "/")
 	if trimmed == "" {
-		http.Error(w, "tenant id required: use /mcp/{tenant_id}", http.StatusNotFound)
+		id, ok := m.TenantIDForRequest(r)
+		if !ok {
+			m.oauth.WriteUnauthorized(w, r)
+			return
+		}
+		instance, ok := m.Instance(id)
+		if !ok {
+			http.Error(w, "tenant not found", http.StatusNotFound)
+			return
+		}
+		r.URL.Path = "/mcp"
+		instance.StreamableServer.ServeHTTP(w, r)
 		return
 	}
 
@@ -294,9 +359,20 @@ func (m *Manager) HandleMCP(w http.ResponseWriter, r *http.Request) {
 	instance.StreamableServer.ServeHTTP(w, r)
 }
 
-// HandleOAuth serves tenant-specific OAuth discovery, registration, authorize, and token endpoints.
+// HandleOAuth serves root and tenant-specific OAuth discovery, registration,
+// authorize, and token endpoints.
 func (m *Manager) HandleOAuth(w http.ResponseWriter, r *http.Request) {
 	trimmed := strings.Trim(strings.TrimPrefix(r.URL.Path, "/oauth"), "/")
+	if trimmed == "" {
+		http.NotFound(w, r)
+		return
+	}
+
+	if !strings.HasPrefix(trimmed, "wa_") {
+		m.handleRootOAuth(trimmed, w, r)
+		return
+	}
+
 	parts := strings.SplitN(trimmed, "/", 2)
 	if len(parts) != 2 || parts[0] == "" {
 		http.NotFound(w, r)
@@ -308,23 +384,351 @@ func (m *Manager) HandleOAuth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	switch "/" + strings.Trim(parts[1], "/") {
+	m.handleOAuthServer(instance.OAuth, parts[1], w, r)
+}
+
+func (m *Manager) handleOAuthServer(oauthServer *auth.Server, path string, w http.ResponseWriter, r *http.Request) {
+	switch "/" + strings.Trim(path, "/") {
 	case "/.well-known/oauth-authorization-server", "/.well-known/openid-configuration":
-		instance.OAuth.AuthorizationServerMetadata(w, r)
+		oauthServer.AuthorizationServerMetadata(w, r)
 	case "/register":
-		instance.OAuth.RegisterClient(w, r)
+		oauthServer.RegisterClient(w, r)
 	case "/authorize":
-		instance.OAuth.Authorize(w, r)
+		oauthServer.Authorize(w, r)
 	case "/token":
-		instance.OAuth.Token(w, r)
+		oauthServer.Token(w, r)
 	default:
 		http.NotFound(w, r)
 	}
 }
 
+func (m *Manager) handleRootOAuth(path string, w http.ResponseWriter, r *http.Request) {
+	switch "/" + strings.Trim(path, "/") {
+	case "/.well-known/oauth-authorization-server", "/.well-known/openid-configuration":
+		m.rootOAuthMetadata(w, r)
+	case "/register":
+		m.rootOAuthRegister(w, r)
+	case "/authorize":
+		m.rootOAuthAuthorize(w, r)
+	case "/token":
+		m.rootOAuthToken(w, r)
+	default:
+		http.NotFound(w, r)
+	}
+}
+
+func (m *Manager) rootOAuthMetadata(w http.ResponseWriter, r *http.Request) {
+	issuer := baseURL(r) + "/oauth"
+	writeJSON(w, http.StatusOK, map[string]any{
+		"issuer":                                issuer,
+		"authorization_endpoint":                issuer + "/authorize",
+		"token_endpoint":                        issuer + "/token",
+		"registration_endpoint":                 issuer + "/register",
+		"response_types_supported":              []string{"code"},
+		"grant_types_supported":                 []string{"authorization_code", "refresh_token"},
+		"code_challenge_methods_supported":      []string{"S256", "plain"},
+		"token_endpoint_auth_methods_supported": []string{"client_secret_basic", "client_secret_post"},
+		"scopes_supported":                      []string{"whatsapp.read", "whatsapp.write"},
+		"resource_indicators_supported":         true,
+	})
+}
+
+func (m *Manager) rootOAuthRegister(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeOAuthError(w, http.StatusMethodNotAllowed, "invalid_request", "Method not allowed")
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"client_id":                  m.oauthClient.ID,
+		"client_secret":              m.oauthClient.Secret,
+		"client_secret_expires_at":   0,
+		"client_name":                "WhatsApp MCP",
+		"grant_types":                []string{"authorization_code", "refresh_token"},
+		"response_types":             []string{"code"},
+		"token_endpoint_auth_method": "client_secret_basic",
+		"scope":                      "whatsapp.read whatsapp.write",
+	})
+}
+
+func (m *Manager) rootOAuthAuthorize(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		m.rootOAuthAuthorizeGet(w, r)
+	case http.MethodPost:
+		m.rootOAuthAuthorizePost(w, r)
+	default:
+		writeOAuthError(w, http.StatusMethodNotAllowed, "invalid_request", "Method not allowed")
+	}
+}
+
+func (m *Manager) rootOAuthAuthorizeGet(w http.ResponseWriter, r *http.Request) {
+	if sessionID := r.URL.Query().Get("oauth_session"); sessionID != "" {
+		m.renderOAuthSession(w, r, sessionID, "")
+		return
+	}
+
+	if errMsg := m.validateRootAuthorizeRequest(r); errMsg != "" {
+		http.Error(w, errMsg, http.StatusBadRequest)
+		return
+	}
+
+	created, err := m.CreateTenant()
+	if err != nil {
+		http.Error(w, "failed to create WhatsApp setup", http.StatusInternalServerError)
+		return
+	}
+
+	scope := r.URL.Query().Get("scope")
+	if scope == "" {
+		scope = "whatsapp.read whatsapp.write"
+	}
+	resource := r.URL.Query().Get("resource")
+	if resource == "" {
+		resource = baseURL(r) + "/mcp"
+	}
+	codeChallengeMethod := r.URL.Query().Get("code_challenge_method")
+	if codeChallengeMethod == "" {
+		codeChallengeMethod = "plain"
+	}
+
+	sessionID := "oas_" + randomToken(24)
+	pending := pendingOAuthAuthorization{
+		ID:                  sessionID,
+		TenantID:            created.ID,
+		SetupToken:          created.SetupToken,
+		ClientID:            r.URL.Query().Get("client_id"),
+		RedirectURI:         r.URL.Query().Get("redirect_uri"),
+		State:               r.URL.Query().Get("state"),
+		Scope:               scope,
+		Resource:            strings.TrimRight(resource, "/"),
+		CodeChallenge:       r.URL.Query().Get("code_challenge"),
+		CodeChallengeMethod: codeChallengeMethod,
+		ExpiresAt:           time.Now().Add(20 * time.Minute),
+	}
+
+	m.mu.Lock()
+	m.pendingOAuth[sessionID] = pending
+	m.mu.Unlock()
+
+	http.Redirect(w, r, "/oauth/authorize?oauth_session="+url.QueryEscape(sessionID), http.StatusFound)
+}
+
+func (m *Manager) rootOAuthAuthorizePost(w http.ResponseWriter, r *http.Request) {
+	if err := r.ParseForm(); err != nil {
+		writeOAuthError(w, http.StatusBadRequest, "invalid_request", "Invalid form body")
+		return
+	}
+	sessionID := r.FormValue("oauth_session")
+	pending, ok := m.getPendingOAuth(sessionID)
+	if !ok {
+		writeOAuthError(w, http.StatusBadRequest, "invalid_request", "Authorization session expired")
+		return
+	}
+
+	instance, ok := m.Instance(pending.TenantID)
+	if !ok {
+		writeOAuthError(w, http.StatusBadRequest, "invalid_request", "WhatsApp setup not found")
+		return
+	}
+	if !instance.WhatsApp.IsLoggedIn() {
+		m.renderOAuthSession(w, r, sessionID, "Scan the QR code with WhatsApp before continuing.")
+		return
+	}
+
+	code := "code-" + randomToken(32)
+	m.mu.Lock()
+	delete(m.pendingOAuth, sessionID)
+	m.authCodes[code] = oauthGrant{
+		TenantID:            pending.TenantID,
+		ClientID:            pending.ClientID,
+		RedirectURI:         pending.RedirectURI,
+		Scope:               pending.Scope,
+		Resource:            pending.Resource,
+		CodeChallenge:       pending.CodeChallenge,
+		CodeChallengeMethod: pending.CodeChallengeMethod,
+		ExpiresAt:           time.Now().Add(5 * time.Minute),
+	}
+	m.mu.Unlock()
+
+	redirectURI, _ := url.Parse(pending.RedirectURI)
+	q := redirectURI.Query()
+	q.Set("code", code)
+	if pending.State != "" {
+		q.Set("state", pending.State)
+	}
+	redirectURI.RawQuery = q.Encode()
+	http.Redirect(w, r, redirectURI.String(), http.StatusFound)
+}
+
+func (m *Manager) rootOAuthToken(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeOAuthError(w, http.StatusMethodNotAllowed, "invalid_request", "Method not allowed")
+		return
+	}
+	if err := r.ParseForm(); err != nil {
+		writeOAuthError(w, http.StatusBadRequest, "invalid_request", "Invalid form body")
+		return
+	}
+	clientID := r.FormValue("client_id")
+	if clientID == "" {
+		if basicID, _, ok := r.BasicAuth(); ok {
+			clientID = basicID
+		}
+	}
+	if !m.authenticateRootOAuthClient(r, clientID) {
+		writeOAuthError(w, http.StatusUnauthorized, "invalid_client", "Invalid client credentials")
+		return
+	}
+
+	switch r.FormValue("grant_type") {
+	case "authorization_code":
+		m.exchangeRootAuthorizationCode(w, r, clientID)
+	case "refresh_token":
+		m.exchangeRootRefreshToken(w, r, clientID)
+	default:
+		writeOAuthError(w, http.StatusBadRequest, "unsupported_grant_type", "Unsupported grant type")
+	}
+}
+
+func (m *Manager) exchangeRootAuthorizationCode(w http.ResponseWriter, r *http.Request, clientID string) {
+	codeValue := r.FormValue("code")
+	m.mu.Lock()
+	grant, ok := m.authCodes[codeValue]
+	if ok {
+		delete(m.authCodes, codeValue)
+	}
+	m.mu.Unlock()
+
+	if !ok || time.Now().After(grant.ExpiresAt) || grant.ClientID != clientID || grant.RedirectURI != r.FormValue("redirect_uri") {
+		writeOAuthError(w, http.StatusBadRequest, "invalid_grant", "Invalid or expired authorization code")
+		return
+	}
+	if !verifyPKCE(grant.CodeChallenge, grant.CodeChallengeMethod, r.FormValue("code_verifier")) {
+		writeOAuthError(w, http.StatusBadRequest, "invalid_grant", "PKCE verification failed")
+		return
+	}
+	m.issueRootTokenResponse(w, grant)
+}
+
+func (m *Manager) exchangeRootRefreshToken(w http.ResponseWriter, r *http.Request, clientID string) {
+	refreshValue := r.FormValue("refresh_token")
+	m.mu.RLock()
+	grant, ok := m.refreshTokens[refreshValue]
+	m.mu.RUnlock()
+	if !ok || time.Now().After(grant.ExpiresAt) || grant.ClientID != clientID {
+		writeOAuthError(w, http.StatusBadRequest, "invalid_grant", "Invalid or expired refresh token")
+		return
+	}
+	m.issueRootTokenResponse(w, grant)
+}
+
+func (m *Manager) issueRootTokenResponse(w http.ResponseWriter, grant oauthGrant) {
+	access := "at-" + randomToken(32)
+	refresh := "rt-" + randomToken(32)
+	now := time.Now()
+
+	accessGrant := grant
+	accessGrant.ExpiresAt = now.Add(time.Hour)
+	refreshGrant := grant
+	refreshGrant.ExpiresAt = now.Add(30 * 24 * time.Hour)
+
+	m.mu.Lock()
+	m.accessTokens[access] = accessGrant
+	m.refreshTokens[refresh] = refreshGrant
+	m.mu.Unlock()
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"access_token":  access,
+		"token_type":    "Bearer",
+		"expires_in":    int64(time.Hour.Seconds()),
+		"refresh_token": refresh,
+		"scope":         grant.Scope,
+	})
+}
+
+func (m *Manager) authenticateRootOAuthClient(r *http.Request, clientID string) bool {
+	if clientID != m.oauthClient.ID {
+		return false
+	}
+	if _, secret, ok := r.BasicAuth(); ok {
+		return constantTimeEqual(secret, m.oauthClient.Secret)
+	}
+	return constantTimeEqual(r.FormValue("client_secret"), m.oauthClient.Secret)
+}
+
+func (m *Manager) validateRootAuthorizeRequest(r *http.Request) string {
+	q := r.URL.Query()
+	if q.Get("response_type") != "code" {
+		return "response_type=code is required"
+	}
+	if q.Get("client_id") != m.oauthClient.ID {
+		return "invalid client_id"
+	}
+	if q.Get("redirect_uri") == "" {
+		return "redirect_uri is required"
+	}
+	if _, err := url.Parse(q.Get("redirect_uri")); err != nil {
+		return "invalid redirect_uri"
+	}
+	if q.Get("code_challenge") == "" {
+		return "code_challenge is required"
+	}
+	method := q.Get("code_challenge_method")
+	if method == "" {
+		method = "plain"
+	}
+	if method != "S256" && method != "plain" {
+		return "unsupported code_challenge_method"
+	}
+	return ""
+}
+
+func (m *Manager) renderOAuthSession(w http.ResponseWriter, r *http.Request, sessionID, message string) {
+	pending, ok := m.getPendingOAuth(sessionID)
+	if !ok {
+		http.Error(w, "authorization session expired", http.StatusBadRequest)
+		return
+	}
+	instance, ok := m.Instance(pending.TenantID)
+	if !ok {
+		http.Error(w, "WhatsApp setup not found", http.StatusBadRequest)
+		return
+	}
+	instance.mu.RLock()
+	qrEvent := instance.qrEvent
+	instance.mu.RUnlock()
+
+	data := map[string]any{
+		"OAuthSession":  sessionID,
+		"SetupToken":    pending.SetupToken,
+		"TenantID":      pending.TenantID,
+		"WhatsAppReady": instance.WhatsApp.IsLoggedIn(),
+		"QREvent":       qrEvent,
+		"HasQRCode":     fileExists(instance.Paths.QRCodePath),
+		"QRURL":         "/setup/" + pending.TenantID + "/qr.png?setup_token=" + urlQueryEscape(pending.SetupToken),
+		"Message":       message,
+	}
+	renderHTML(w, oauthAuthorizeTemplate, data)
+}
+
+func (m *Manager) getPendingOAuth(sessionID string) (pendingOAuthAuthorization, bool) {
+	m.mu.RLock()
+	pending, ok := m.pendingOAuth[sessionID]
+	m.mu.RUnlock()
+	if !ok || time.Now().After(pending.ExpiresAt) {
+		return pendingOAuthAuthorization{}, false
+	}
+	return pending, true
+}
+
 // HandleProtectedResourceMetadata serves tenant-specific MCP OAuth protected-resource metadata.
 func (m *Manager) HandleProtectedResourceMetadata(w http.ResponseWriter, r *http.Request) {
 	trimmed := strings.Trim(strings.TrimPrefix(r.URL.Path, "/.well-known/oauth-protected-resource"), "/")
+	if trimmed == "" {
+		m.oauth.ProtectedResourceMetadata(w, r)
+		return
+	}
+
 	parts := strings.Split(trimmed, "/")
 	if len(parts) != 2 || parts[0] != "mcp" {
 		http.NotFound(w, r)
@@ -336,6 +740,54 @@ func (m *Manager) HandleProtectedResourceMetadata(w http.ResponseWriter, r *http
 		return
 	}
 	instance.OAuth.ProtectedResourceMetadata(w, r)
+}
+
+// TenantIDForRequest returns the tenant ID bound to a direct API key or root OAuth token.
+func (m *Manager) TenantIDForRequest(r *http.Request) (string, bool) {
+	token := bearerToken(r.Header.Get("Authorization"))
+	if token == "" {
+		token = r.Header.Get("X-API-Key")
+	}
+	if token == "" {
+		return "", false
+	}
+	if id, ok := m.TenantIDForAPIKey(token); ok {
+		return id, true
+	}
+	if id, ok := m.TenantIDForOAuthToken(token); ok {
+		return id, true
+	}
+	return m.oauth.SubjectForRequest(r)
+}
+
+// TenantIDForOAuthToken finds the tenant mapped to a root OAuth access token.
+func (m *Manager) TenantIDForOAuthToken(token string) (string, bool) {
+	if token == "" {
+		return "", false
+	}
+	m.mu.RLock()
+	grant, ok := m.accessTokens[token]
+	m.mu.RUnlock()
+	if !ok || time.Now().After(grant.ExpiresAt) {
+		return "", false
+	}
+	return grant.TenantID, true
+}
+
+// TenantIDForAPIKey finds the tenant whose API-key hash matches apiKey.
+func (m *Manager) TenantIDForAPIKey(apiKey string) (string, bool) {
+	if apiKey == "" {
+		return "", false
+	}
+	hash := hashSecret(apiKey)
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, record := range m.records {
+		if constantTimeEqual(hash, record.APIKeyHash) {
+			return record.ID, true
+		}
+	}
+	return "", false
 }
 
 // Instance returns a live tenant instance.
@@ -405,7 +857,7 @@ func (m *Manager) renderTenantSetup(w http.ResponseWriter, r *http.Request, id, 
 		"ID":             id,
 		"APIKey":         apiKey,
 		"SetupToken":     r.URL.Query().Get("setup_token"),
-		"MCPURL":         baseURL(r) + "/mcp/" + id,
+		"MCPURL":         baseURL(r) + "/mcp",
 		"WhatsAppReady":  instance.WhatsApp.IsLoggedIn(),
 		"QREvent":        qrEvent,
 		"HasQRCode":      fileExists(instance.Paths.QRCodePath),
@@ -445,7 +897,7 @@ func (m *Manager) ValidateSetupAccess(r *http.Request, id string) bool {
 }
 
 func (m *Manager) startWhatsAppSetup(instance *Instance) {
-	m.logger.Printf("Tenant %s is not linked. Open /setup/%s to scan the QR code.", instance.Record.ID, instance.Record.ID)
+	m.logger.Printf("Tenant %s is not linked. Open the setup URL returned when the tenant was created to scan the QR code.", instance.Record.ID)
 	qrChan, err := instance.WhatsApp.GetQRChannel(context.Background())
 	if err != nil {
 		m.logger.Printf("Failed to start WhatsApp setup for tenant %s: %v", instance.Record.ID, err)
@@ -560,6 +1012,38 @@ func renderHTML(w http.ResponseWriter, tmpl *template.Template, data any) {
 	_ = tmpl.Execute(w, data)
 }
 
+func writeJSON(w http.ResponseWriter, status int, body any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(body)
+}
+
+func writeOAuthError(w http.ResponseWriter, status int, code, description string) {
+	writeJSON(w, status, map[string]string{
+		"error":             code,
+		"error_description": description,
+	})
+}
+
+func verifyPKCE(challenge, method, verifier string) bool {
+	if challenge == "" {
+		return false
+	}
+	if method == "S256" {
+		sum := sha256.Sum256([]byte(verifier))
+		expected := base64.RawURLEncoding.EncodeToString(sum[:])
+		return constantTimeEqual(expected, challenge)
+	}
+	return constantTimeEqual(verifier, challenge)
+}
+
+func getenv(key, fallback string) string {
+	if value := os.Getenv(key); value != "" {
+		return value
+	}
+	return fallback
+}
+
 var createSetupTemplate = template.Must(template.New("setup").Parse(`<!doctype html>
 <html lang="en">
 <head>
@@ -579,6 +1063,51 @@ var createSetupTemplate = template.Must(template.New("setup").Parse(`<!doctype h
     <h1>Set Up WhatsApp MCP</h1>
     <p>Create an isolated WhatsApp connection. The next page shows a WhatsApp QR code and a new API key for this connection.</p>
     <form method="post" action="/setup"><button type="submit">Create WhatsApp Setup</button></form>
+  </main>
+</body>
+</html>`))
+
+var oauthAuthorizeTemplate = template.Must(template.New("oauth-authorize").Parse(`<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  {{if not .WhatsAppReady}}<meta http-equiv="refresh" content="8">{{end}}
+  <title>Connect WhatsApp</title>
+  <style>
+    body { font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 0; min-height: 100vh; display: grid; place-items: center; background: #f6f7f9; color: #17202a; }
+    main { width: min(520px, calc(100vw - 32px)); background: #fff; border: 1px solid #dfe4ea; border-radius: 8px; padding: 28px; box-shadow: 0 12px 28px rgba(15, 23, 42, .08); }
+    h1 { font-size: 24px; margin: 0 0 10px; }
+    p { color: #4b5563; line-height: 1.45; }
+    img { width: 256px; height: 256px; image-rendering: crisp-edges; border: 1px solid #dfe4ea; border-radius: 6px; }
+    button { font: inherit; font-weight: 700; color: #fff; background: #1f7a4d; border: 0; border-radius: 6px; padding: 11px 16px; cursor: pointer; }
+    .status { margin: 14px 0; padding: 10px 12px; border-radius: 6px; background: #eef6f1; color: #245b3a; }
+    .warn { background: #fff7ed; color: #9a3412; }
+    .error { background: #fef2f2; color: #991b1b; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Connect WhatsApp</h1>
+    {{if .WhatsAppReady}}
+      <div class="status">WhatsApp is connected and verified.</div>
+      <p>Continue to finish authorizing your MCP client.</p>
+      <form method="post" action="/oauth/authorize">
+        <input type="hidden" name="oauth_session" value="{{.OAuthSession}}">
+        <button type="submit">Continue</button>
+      </form>
+    {{else}}
+      <div class="status warn">Waiting for WhatsApp connection.</div>
+      {{if .Message}}<div class="status error">{{.Message}}</div>{{end}}
+      {{if eq .QREvent "err-client-outdated"}}
+        <p>WhatsApp rejected this client as outdated. Restart the server so it can refresh the WhatsApp Web version, or set WHATSAPP_WEB_VERSION manually.</p>
+      {{else if .HasQRCode}}
+        <img alt="WhatsApp setup QR code" src="{{.QRURL}}">
+        <p>Open WhatsApp on your phone, go to Linked devices, and scan this QR code. This page refreshes automatically.</p>
+      {{else}}
+        <p>QR code is being generated. This page refreshes automatically.</p>
+      {{end}}
+    {{end}}
   </main>
 </body>
 </html>`))

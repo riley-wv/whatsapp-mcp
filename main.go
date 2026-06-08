@@ -48,7 +48,9 @@ func main() {
 	mux.HandleFunc("/setup/", tenantManager.HandleSetup)
 	mux.HandleFunc("/mcp", tenantManager.HandleMCP)
 	mux.HandleFunc("/mcp/", tenantManager.HandleMCP)
+	mux.HandleFunc("/oauth", tenantManager.HandleOAuth)
 	mux.HandleFunc("/oauth/", tenantManager.HandleOAuth)
+	mux.HandleFunc("/.well-known/oauth-protected-resource", tenantManager.HandleProtectedResourceMetadata)
 	mux.HandleFunc("/.well-known/oauth-protected-resource/", tenantManager.HandleProtectedResourceMetadata)
 
 	httpServer := &http.Server{
@@ -59,7 +61,7 @@ func main() {
 	go func() {
 		log.Printf("Starting server on http://0.0.0.0:%s", httpPort)
 		log.Printf("- Setup URL: http://0.0.0.0:%s/setup", httpPort)
-		log.Printf("- MCP endpoint format: http://0.0.0.0:%s/mcp/{TENANT_ID}", httpPort)
+		log.Printf("- MCP endpoint: http://0.0.0.0:%s/mcp", httpPort)
 		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("Server error: %v", err)
 		}

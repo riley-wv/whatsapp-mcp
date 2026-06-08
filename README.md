@@ -96,7 +96,7 @@ graph TB
         E[(SQLite Database<br/>per tenant)]
 
         B -->|/setup creates tenant + QR| S
-        B -->|/mcp/{tenant_id}| C
+        B -->|/mcp endpoint| C
         B -->|/health| B
 
         C -->|Tools| C1[list_chats<br/>get_chat_messages<br/>search_messages<br/>find_chat<br/>send_message<br/>load_more_messages<br/>get_my_info]
@@ -164,7 +164,7 @@ graph TB
 
    The setup page shows:
    - A tenant ID
-   - A tenant-specific MCP URL
+   - The shared MCP URL
    - A tenant-specific API key
 
 4. **Verify it's running**
@@ -206,7 +206,7 @@ Add to your Claude Desktop config (`~/Library/Application Support/Claude/claude_
 {
   "mcpServers": {
     "whatsapp": {
-      "url": "http://localhost:8080/mcp/your-tenant-id",
+      "url": "http://localhost:8080/mcp",
       "transport": "http",
       "headers": {
         "Authorization": "Bearer your-tenant-api-key"
@@ -221,20 +221,22 @@ Add to your Claude Desktop config (`~/Library/Application Support/Claude/claude_
 The server exposes an HTTP+SSE endpoint compatible with any MCP client:
 
 - **Setup URL:** `http://localhost:8080/setup`
-- **MCP URL:** `http://localhost:8080/mcp/{TENANT_ID}`
+- **MCP URL:** `http://localhost:8080/mcp`
 - **Transport:** Streamable HTTP
-- **Direct API-key authentication:** `Authorization: Bearer {TENANT_API_KEY}` or `X-API-Key: {TENANT_API_KEY}`
-- **Standard MCP OAuth:** Supported per tenant. Unauthenticated MCP requests return a `WWW-Authenticate` challenge with tenant-specific protected-resource metadata. The OAuth login page asks for that tenant's API key and issues an access token bound to `http://host/mcp/{TENANT_ID}`.
+- **Direct API-key authentication:** `Authorization: Bearer {TENANT_API_KEY}` or `X-API-Key: {TENANT_API_KEY}`. The server derives the tenant from the API key hash.
+- **Standard MCP OAuth:** Supported on the same shared MCP URL. Unauthenticated MCP requests return a `WWW-Authenticate` challenge with protected-resource metadata. The OAuth login page asks for the tenant API key, then issues an access token bound to `http://host/mcp` and internally mapped to that tenant.
 
-Each WhatsApp setup has its own tenant ID, WhatsApp auth database, message database, media directory, and API key. A tenant API key can only call that tenant's MCP endpoint.
+Each WhatsApp setup has its own tenant ID, WhatsApp auth database, message database, media directory, and API key. A tenant API key or OAuth token can only access that tenant's WhatsApp data.
 
-OAuth discovery endpoints are tenant-specific:
+Shared OAuth discovery endpoints:
 
-- Protected resource metadata: `/.well-known/oauth-protected-resource/mcp/{TENANT_ID}`
-- Authorization server metadata: `/oauth/{TENANT_ID}/.well-known/oauth-authorization-server`
-- Dynamic client registration: `/oauth/{TENANT_ID}/register`
-- Authorization: `/oauth/{TENANT_ID}/authorize`
-- Token exchange: `/oauth/{TENANT_ID}/token`
+- Protected resource metadata: `/.well-known/oauth-protected-resource`
+- Authorization server metadata: `/oauth/.well-known/oauth-authorization-server`
+- Dynamic client registration: `/oauth/register`
+- Authorization: `/oauth/authorize`
+- Token exchange: `/oauth/token`
+
+The explicit tenant endpoint `http://localhost:8080/mcp/{TENANT_ID}` and tenant-specific OAuth endpoints remain available for backward compatibility.
 
 ## 🎨 Usage Examples
 

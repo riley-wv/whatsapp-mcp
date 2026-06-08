@@ -37,6 +37,7 @@ type Server struct {
 	refreshTokenTTL time.Duration
 	isWhatsAppReady func() bool
 	validateAPIKey  func(string) bool
+	resolveAPIKey   func(string) (string, bool)
 
 	mu            sync.RWMutex
 	clients       map[string]registeredClient
@@ -63,6 +64,7 @@ type authorizationCode struct {
 	CodeChallenge       string
 	CodeChallengeMethod string
 	ExpiresAt           time.Time
+	Subject             string
 }
 
 type issuedToken struct {
@@ -70,6 +72,7 @@ type issuedToken struct {
 	ClientID  string
 	Scope     string
 	Resource  string
+	Subject   string
 	ExpiresAt time.Time
 }
 
@@ -86,6 +89,7 @@ type Config struct {
 	RefreshTokenTTL time.Duration
 	IsWhatsAppReady func() bool
 	ValidateAPIKey  func(string) bool
+	ResolveAPIKey   func(string) (string, bool)
 }
 
 // NewServer creates an in-memory OAuth authorization/resource server.
@@ -116,6 +120,11 @@ func NewServer(cfg Config) *Server {
 			return constantTimeEqual(value, cfg.APIKey)
 		}
 	}
+	if cfg.ResolveAPIKey == nil {
+		cfg.ResolveAPIKey = func(value string) (string, bool) {
+			return "", cfg.ValidateAPIKey(value)
+		}
+	}
 
 	return &Server{
 		apiKey:          cfg.APIKey,
@@ -129,6 +138,7 @@ func NewServer(cfg Config) *Server {
 		refreshTokenTTL: cfg.RefreshTokenTTL,
 		isWhatsAppReady: cfg.IsWhatsAppReady,
 		validateAPIKey:  cfg.ValidateAPIKey,
+		resolveAPIKey:   cfg.ResolveAPIKey,
 		clients:         make(map[string]registeredClient),
 		authCodes:       make(map[string]authorizationCode),
 		accessTokens:    make(map[string]issuedToken),
@@ -138,26 +148,38 @@ func NewServer(cfg Config) *Server {
 
 // ValidateRequest returns true when the request has a valid API key or OAuth token.
 func (s *Server) ValidateRequest(r *http.Request) bool {
+	_, ok := s.SubjectForRequest(r)
+	return ok
+}
+
+// SubjectForRequest returns the subject bound to a valid API key or OAuth token.
+func (s *Server) SubjectForRequest(r *http.Request) (string, bool) {
 	token, ok := bearerToken(r.Header.Get("Authorization"))
 	if !ok {
 		token = r.Header.Get("X-API-Key")
 	}
 	if token == "" {
-		return false
+		return "", false
 	}
 	if s.apiKey != "" && constantTimeEqual(token, s.apiKey) {
-		return true
+		return "", true
+	}
+	if subject, ok := s.resolveAPIKey(token); ok {
+		return subject, true
 	}
 
 	s.mu.RLock()
 	issued, ok := s.accessTokens[token]
 	s.mu.RUnlock()
 	if !ok || time.Now().After(issued.ExpiresAt) {
-		return false
+		return "", false
 	}
 
 	resource := s.resourceURL(r)
-	return resourceMatches(issued.Resource, resource)
+	if !resourceMatches(issued.Resource, resource) {
+		return "", false
+	}
+	return issued.Subject, true
 }
 
 // WriteUnauthorized sends the MCP OAuth discovery challenge.
@@ -299,7 +321,7 @@ func (s *Server) renderAuthorize(w http.ResponseWriter, r *http.Request, message
 		WhatsAppReady bool
 		Params        map[string]string
 	}{
-		Action:        "/authorize",
+		Action:        r.URL.Path,
 		Message:       message,
 		WhatsAppReady: s.isWhatsAppReady(),
 		Params:        formParams(r),
@@ -318,7 +340,8 @@ func (s *Server) completeAuthorize(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, errMsg, http.StatusBadRequest)
 		return
 	}
-	if !s.validateAPIKey(r.FormValue("api_key")) {
+	subject, ok := s.resolveAPIKey(r.FormValue("api_key"))
+	if !ok {
 		s.renderAuthorize(w, r, "Invalid API key")
 		return
 	}
@@ -343,6 +366,7 @@ func (s *Server) completeAuthorize(w http.ResponseWriter, r *http.Request) {
 		CodeChallenge:       r.FormValue("code_challenge"),
 		CodeChallengeMethod: r.FormValue("code_challenge_method"),
 		ExpiresAt:           time.Now().Add(authCodeTTL),
+		Subject:             subject,
 	}
 	s.mu.Unlock()
 
@@ -414,7 +438,7 @@ func (s *Server) exchangeAuthorizationCode(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	s.issueTokenResponse(w, code.ClientID, code.Scope, code.Resource)
+	s.issueTokenResponse(w, code.ClientID, code.Scope, code.Resource, code.Subject)
 }
 
 func (s *Server) exchangeRefreshToken(w http.ResponseWriter, r *http.Request) {
@@ -433,10 +457,10 @@ func (s *Server) exchangeRefreshToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.issueTokenResponse(w, refreshToken.ClientID, refreshToken.Scope, refreshToken.Resource)
+	s.issueTokenResponse(w, refreshToken.ClientID, refreshToken.Scope, refreshToken.Resource, refreshToken.Subject)
 }
 
-func (s *Server) issueTokenResponse(w http.ResponseWriter, clientID, scope, resource string) {
+func (s *Server) issueTokenResponse(w http.ResponseWriter, clientID, scope, resource, subject string) {
 	access := "at-" + randomString(32)
 	refresh := "rt-" + randomString(32)
 	now := time.Now()
@@ -447,6 +471,7 @@ func (s *Server) issueTokenResponse(w http.ResponseWriter, clientID, scope, reso
 		ClientID:  clientID,
 		Scope:     scope,
 		Resource:  resource,
+		Subject:   subject,
 		ExpiresAt: now.Add(s.accessTokenTTL),
 	}
 	s.refreshTokens[refresh] = issuedToken{
@@ -454,6 +479,7 @@ func (s *Server) issueTokenResponse(w http.ResponseWriter, clientID, scope, reso
 		ClientID:  clientID,
 		Scope:     scope,
 		Resource:  resource,
+		Subject:   subject,
 		ExpiresAt: now.Add(s.refreshTokenTTL),
 	}
 	s.mu.Unlock()
